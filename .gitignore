@@ -1,0 +1,15 @@
+# API keys and secrets - NEVER commit
+.env
+youtube_token.json
+client_secret*.json
+
+# Generated output (large files)
+output/
+ready_to_UPLOAD/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
