@@ -18,6 +18,79 @@ def _subject_words(subject: str) -> list:
             if len(w) > 3 and w.lower().strip(".,()") not in skip]
 
 
+def _score_candidate(title: str, subject: str, search_query: str) -> float:
+    """
+    Score a result candidate by how well its title matches the subject and query.
+    Higher = better match. Used when strict validation fails to pick best available.
+    """
+    import re
+    title_lower = title.lower()
+    score = 0.0
+
+    # Subject word matches (most important)
+    name_skip = {"mr", "mrs", "ms", "sir", "jr", "sr"}
+    name_words = [w.lower().strip(".,()") for w in subject.split()
+                  if w.lower().strip(".,()") not in name_skip and len(w) > 1]
+    if name_words:
+        matched = sum(1 for w in name_words if w in title_lower)
+        score += (matched / len(name_words)) * 10  # up to 10 points for subject match
+
+    # Query keyword matches (secondary)
+    query_words = [w.lower() for w in search_query.split() if len(w) > 3]
+    if query_words:
+        matched = sum(1 for w in query_words if w in title_lower)
+        score += (matched / len(query_words)) * 4  # up to 4 points for query match
+
+    # Year match bonus
+    years = re.findall(r'\b(19\d\d|20\d\d)\b', search_query)
+    if years and any(yr in title_lower for yr in years):
+        score += 2
+
+    return score
+
+
+def _collect_candidates_ddg(search_query: str, subject: str, max_results: int = 15) -> list:
+    """Collect scored (url, title, score) candidates from DDG without downloading."""
+    candidates = []
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.images(search_query, max_results=max_results, type_image="photo"))
+        for r in results:
+            title = r.get("title", "") + " " + r.get("url", "")
+            score = _score_candidate(title, subject, search_query)
+            if score > 0:
+                candidates.append((r["image"], title.strip(), score))
+    except Exception:
+        pass
+    return candidates
+
+
+def _collect_candidates_wikimedia(search_query: str, subject: str) -> list:
+    """Collect scored candidates from Wikimedia Commons."""
+    candidates = []
+    try:
+        resp = requests.get("https://commons.wikimedia.org/w/api.php", params={
+            "action": "query", "list": "search", "srsearch": search_query,
+            "srnamespace": "6", "srlimit": "20", "format": "json"
+        }, headers=HEADERS, timeout=15)
+        for item in resp.json().get("query", {}).get("search", []):
+            title = item.get("title", "")
+            score = _score_candidate(title, subject, search_query)
+            if score > 0:
+                # Get image URL
+                info = requests.get("https://commons.wikimedia.org/w/api.php", params={
+                    "action": "query", "titles": title,
+                    "prop": "imageinfo", "iiprop": "url", "format": "json"
+                }, headers=HEADERS, timeout=10).json()
+                for page in info.get("query", {}).get("pages", {}).values():
+                    url = page.get("imageinfo", [{}])[0].get("url", "")
+                    if url:
+                        candidates.append((url, title, score))
+    except Exception:
+        pass
+    return candidates
+
+
 def _last_name(subject: str) -> str:
     """Extract last name from a person/place subject — the most distinctive word."""
     skip = {"dr", "mr", "mrs", "ms", "prof", "sir", "jr", "sr", "phd", "md"}
@@ -396,6 +469,46 @@ def search_real_image(search_query: str, output_path: str, subject: str = "") ->
     time.sleep(0.5)
     if _try_pexels(search_query, output_path):
         return True
+    return False
+
+
+def search_best_available_image(search_query: str, output_path: str, subject: str = "") -> bool:
+    """
+    Fallback when strict subject validation found nothing.
+    Collects candidates from DDG and Wikimedia Commons, scores each by how well
+    its title matches the subject + query, and downloads the best scoring one.
+    """
+    all_candidates = []
+
+    # Collect from DDG
+    all_candidates.extend(_collect_candidates_ddg(search_query, subject))
+    time.sleep(0.5)
+    # Also try subject-only search for more candidates
+    if subject and subject.lower() != search_query.lower():
+        all_candidates.extend(_collect_candidates_ddg(subject, subject))
+        time.sleep(0.5)
+    # Collect from Wikimedia
+    all_candidates.extend(_collect_candidates_wikimedia(search_query, subject))
+
+    if not all_candidates:
+        return False
+
+    # Sort by score descending, try downloading from highest score first
+    all_candidates.sort(key=lambda x: x[2], reverse=True)
+    for url, title, score in all_candidates[:5]:  # try top 5
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=10)
+            if resp.status_code == 200 and len(resp.content) > 10000:
+                ct = resp.headers.get("content-type", "")
+                if "image" in ct or url.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+                    with open(output_path, "wb") as f:
+                        f.write(resp.content)
+                    safe_title = title[:60].encode('ascii', errors='replace').decode('ascii')
+                    print(f"  [best match] {safe_title} (score={score:.1f})")
+                    return True
+        except Exception:
+            continue
     return False
 
 

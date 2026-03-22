@@ -8,7 +8,7 @@ load_dotenv()
 
 from modules.script_generator import generate_script
 from modules.voiceover import generate_voiceover
-from modules.image_generator import generate_image, search_real_image, generate_ai_image
+from modules.image_generator import generate_image, search_real_image, generate_ai_image, search_best_available_image
 from modules.video_assembler import assemble_video, make_outro_scene
 from modules.topic_suggester import suggest_and_select_topic
 from modules.clip_fetcher import fetch_clip, fetch_clip_from_query
@@ -187,7 +187,14 @@ def run_pipeline(topic: str, num_scenes: int = 12):
             if got_img:
                 subject_found_count[subj_key] += 1
             else:
-                print(f"    img{j+1} [{media_type}]: no real image found, skipping ({subject or query[:35]})")
+                # Strict search found nothing — try best-scoring candidate across all sources
+                got_img = search_best_available_image(query, img_path, subject=subject)
+                if got_img:
+                    scene_images.append({"path": img_path, "is_video": False, "label": label})
+                    scene_imgs_fallback.append(img_path)
+                    subject_found_count[subj_key] += 1
+                else:
+                    print(f"    img{j+1} [{media_type}]: no image found, skipping ({subject or query[:35]})")
 
         # Interleave: clip, image, clip, image... (documentary B-roll + cutaway style)
         scene_media = []
