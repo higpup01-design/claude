@@ -128,12 +128,24 @@ def run_pipeline(topic: str, num_scenes: int = 12):
             image_searches = [{"search_query": scene.get("search_query", topic),
                                 "ai_image_prompt": scene.get("ai_image_prompt", "")}]
 
+        # Per-subject caps: count how many times each subject appears in script
+        from collections import Counter as _Counter
+        subject_script_count = _Counter(s.get("subject", "").lower() for s in image_searches)
+        subject_found_count = _Counter()
+
         for j, search in enumerate(image_searches):
             query = search["search_query"]
             ai_prompt = search.get("ai_image_prompt", "")
             subject = search.get("subject", "")
             label = search.get("label", "")
             media_type = search.get("type", "")
+
+            # Skip if we already have script_count + 2 images for this subject
+            subj_key = subject.lower()
+            cap = subject_script_count[subj_key] + 2
+            if subject_found_count[subj_key] >= cap:
+                print(f"    img{j+1} [{media_type}]: cap reached for '{subject}', skipping")
+                continue
 
             img_path = str(images_dir / f"{safe_name}_scene_{i:02d}_img{j}.png")
             got_img = False
@@ -172,18 +184,10 @@ def run_pipeline(topic: str, num_scenes: int = 12):
                         scene_imgs_fallback.append(img_path)
                         print(f"    img{j+1} [{media_type}]: found via death search ({subject})")
 
-            if not got_img:
-                ai_path = str(images_dir / f"{safe_name}_scene_{i:02d}_img{j}_ai.png")
-                if Path(ai_path).exists() and Path(ai_path).stat().st_size > 5000:
-                    print(f"    img{j+1} [{media_type}]: reusing cached AI")
-                    scene_images.append({"path": ai_path, "is_video": False, "label": label})
-                    scene_imgs_fallback.append(ai_path)
-                else:
-                    ok = generate_ai_image(ai_prompt, query, ai_path)
-                    if ok:
-                        scene_images.append({"path": ai_path, "is_video": False, "label": label})
-                        scene_imgs_fallback.append(ai_path)
-                        print(f"    img{j+1} [{media_type}]: AI generated ({subject})")
+            if got_img:
+                subject_found_count[subj_key] += 1
+            else:
+                print(f"    img{j+1} [{media_type}]: no real image found, skipping ({subject or query[:35]})")
 
         # Interleave: clip, image, clip, image... (documentary B-roll + cutaway style)
         scene_media = []

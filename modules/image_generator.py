@@ -392,6 +392,10 @@ def search_real_image(search_query: str, output_path: str, subject: str = "") ->
                 time.sleep(0.5)
             except Exception:
                 continue
+    # Last real-photo fallback: Pexels stock (real photos, just generic)
+    time.sleep(0.5)
+    if _try_pexels(search_query, output_path):
+        return True
     return False
 
 
