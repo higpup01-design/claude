@@ -176,6 +176,144 @@ def _try_archive_org_image(search_query: str, output_path: str, subject: str = "
     return False
 
 
+def _download_image(url: str, output_path: str, label: str, subject: str = "", search_query: str = "", title_check: str = "") -> bool:
+    """Shared helper: validate title, download image, save to output_path."""
+    if title_check and subject and not _title_matches_subject(title_check, subject, search_query):
+        return False
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        if resp.status_code == 200 and len(resp.content) > 10000:
+            ct = resp.headers.get("content-type", "")
+            if "image" not in ct and not url.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp")):
+                return False
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, "wb") as f:
+                f.write(resp.content)
+            print(f"  [{label}] {title_check[:60].encode('ascii', errors='replace').decode('ascii')}")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _try_wikimedia_commons(search_query: str, output_path: str, subject: str = "") -> bool:
+    """Search Wikimedia Commons for free images. No API key required."""
+    try:
+        resp = requests.get("https://commons.wikimedia.org/w/api.php", params={
+            "action": "query", "list": "search", "srsearch": search_query,
+            "srnamespace": "6", "srlimit": "20", "format": "json"
+        }, headers=HEADERS, timeout=15)
+        if resp.status_code != 200:
+            return False
+        results = resp.json().get("query", {}).get("search", [])
+        for item in results:
+            title = item.get("title", "")
+            if not _title_matches_subject(title, subject, search_query):
+                continue
+            # Get direct image URL
+            info_resp = requests.get("https://commons.wikimedia.org/w/api.php", params={
+                "action": "query", "titles": title,
+                "prop": "imageinfo", "iiprop": "url", "format": "json"
+            }, headers=HEADERS, timeout=10)
+            pages = info_resp.json().get("query", {}).get("pages", {})
+            for page in pages.values():
+                img_url = page.get("imageinfo", [{}])[0].get("url", "")
+                if img_url and _download_image(img_url, output_path, "wikimedia", subject, search_query, title):
+                    return True
+    except Exception as e:
+        print(f"  [wikimedia] Error: {e}")
+    return False
+
+
+def _try_loc_images(search_query: str, output_path: str, subject: str = "") -> bool:
+    """Search Library of Congress free photo collection."""
+    try:
+        resp = requests.get("https://www.loc.gov/photos/", params={
+            "q": search_query, "fo": "json", "c": "20"
+        }, headers=HEADERS, timeout=15)
+        if resp.status_code != 200:
+            return False
+        results = resp.json().get("results", [])
+        for item in results:
+            title = item.get("title", "")
+            if not _title_matches_subject(title, subject, search_query):
+                continue
+            # Try to get a usable image URL
+            image_url = ""
+            for img in item.get("image_url", []):
+                if isinstance(img, str) and img.startswith("http"):
+                    image_url = img
+                    break
+            if not image_url:
+                continue
+            if _download_image(image_url, output_path, "loc.gov", subject, search_query, title):
+                return True
+    except Exception as e:
+        print(f"  [loc.gov] Error: {e}")
+    return False
+
+
+def _try_chronicling_america(search_query: str, output_path: str, subject: str = "") -> bool:
+    """Search Chronicling America (Library of Congress) for historical newspaper pages."""
+    import re
+    try:
+        params = {"andtext": search_query, "format": "json", "rows": "20", "sort": "relevance"}
+        # Add date range if year found
+        year_match = re.search(r'\b(19\d\d|20\d\d)\b', search_query)
+        if year_match:
+            yr = int(year_match.group(1))
+            params["date1"] = str(max(1770, yr - 3))
+            params["date2"] = str(min(1963, yr + 3))
+        resp = requests.get("https://chroniclingamerica.loc.gov/search/pages/results/",
+                            params=params, headers=HEADERS, timeout=15)
+        if resp.status_code != 200:
+            return False
+        items = resp.json().get("items", [])
+        for item in items:
+            title = item.get("title", "") + " " + " ".join(item.get("subject", []))
+            if not _title_matches_subject(title, subject, search_query):
+                continue
+            thumb = item.get("thumbnail", "")
+            if not thumb:
+                continue
+            url = f"https://chroniclingamerica.loc.gov{thumb}" if thumb.startswith("/") else thumb
+            if _download_image(url, output_path, "chronicling america", subject, search_query, item.get("title", "")):
+                return True
+    except Exception as e:
+        print(f"  [chronicling america] Error: {e}")
+    return False
+
+
+def _try_flickr(search_query: str, output_path: str, subject: str = "") -> bool:
+    """Search Flickr Creative Commons photos. Requires FLICKR_API_KEY."""
+    api_key = os.environ.get("FLICKR_API_KEY", "")
+    if not api_key:
+        return False
+    try:
+        resp = requests.get("https://api.flickr.com/services/rest/", params={
+            "method": "flickr.photos.search", "api_key": api_key,
+            "text": search_query, "license": "1,2,3,4,5,6,9,10",
+            "content_type": "1", "per_page": "20", "format": "json",
+            "nojsoncallback": "1", "sort": "relevance",
+            "extras": "url_l,url_o,title"
+        }, headers=HEADERS, timeout=15)
+        if resp.status_code != 200:
+            return False
+        photos = resp.json().get("photos", {}).get("photo", [])
+        for photo in photos:
+            title = photo.get("title", "")
+            if not _title_matches_subject(title, subject, search_query):
+                continue
+            img_url = photo.get("url_l") or photo.get("url_o", "")
+            if not img_url:
+                continue
+            if _download_image(img_url, output_path, "flickr", subject, search_query, title):
+                return True
+    except Exception as e:
+        print(f"  [flickr] Error: {e}")
+    return False
+
+
 def _try_pollinations(ai_prompt: str, output_path: str) -> bool:
     """Generate AI image via Pollinations.ai (free, no API key). Returns True if successful."""
     try:
@@ -217,24 +355,43 @@ def _try_pexels(query: str, output_path: str) -> bool:
 
 def search_real_image(search_query: str, output_path: str, subject: str = "") -> bool:
     """
-    Try to find a real photo for the query.
-    1. DuckDuckGo with full search_query (validates result title against subject + year context)
-    2. Archive.org historical photos/newspapers (same validation)
-    3. DuckDuckGo with just the subject name (fallback by name, still validated)
+    Try to find a real photo for the query across multiple sources.
+    All sources apply the same subject-name validation before accepting a result.
+    Order: DDG → Wikimedia Commons → Library of Congress → Flickr CC →
+           Archive.org → Chronicling America → subject-name fallbacks
     Returns True if a real image was saved, False otherwise.
     """
     if _try_web_search(search_query, output_path, subject=subject):
         return True
-    time.sleep(1)
+    time.sleep(0.5)
+    if _try_wikimedia_commons(search_query, output_path, subject=subject):
+        return True
+    time.sleep(0.5)
+    if _try_loc_images(search_query, output_path, subject=subject):
+        return True
+    time.sleep(0.5)
+    if _try_flickr(search_query, output_path, subject=subject):
+        return True
+    time.sleep(0.5)
     if _try_archive_org_image(search_query, output_path, subject=subject, orig_query=search_query):
         return True
-    # Last resort: search by subject name alone (shorter query = broader results)
+    time.sleep(0.5)
+    if _try_chronicling_america(search_query, output_path, subject=subject):
+        return True
+    # Fallback: search by subject name alone across all sources
     if subject and subject.strip() and subject.strip().lower() != search_query.strip().lower():
-        time.sleep(1)
-        if _try_web_search(subject.strip(), output_path, subject=subject):
-            return True
-        if _try_archive_org_image(subject.strip(), output_path, subject=subject, orig_query=search_query):
-            return True
+        time.sleep(0.5)
+        for fn in [_try_web_search, _try_wikimedia_commons, _try_loc_images,
+                   _try_flickr, _try_archive_org_image, _try_chronicling_america]:
+            try:
+                kwargs = {"subject": subject}
+                if fn == _try_archive_org_image:
+                    kwargs["orig_query"] = search_query
+                if fn(subject.strip(), output_path, **kwargs):
+                    return True
+                time.sleep(0.5)
+            except Exception:
+                continue
     return False
 
 
